@@ -1,0 +1,9 @@
+/build/
+/.gradle/
+/out/
+/*.iml
+/.idea/
+/.vscode/
+*.log
+imgui.ini
+*.spv
