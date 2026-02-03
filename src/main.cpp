@@ -625,7 +625,7 @@ int main(int, char**) {
                 const double dx = mouse_x - last_mouse_x;
                 const double dy = mouse_y - last_mouse_y;
                 camera_yaw += static_cast<float>(dx) * mouse_sensitivity;
-                camera_pitch += static_cast<float>(dy) * mouse_sensitivity;
+                camera_pitch -= static_cast<float>(dy) * mouse_sensitivity;
                 camera_pitch = std::max(-1.4f, std::min(1.4f, camera_pitch));
                 last_mouse_x = mouse_x;
                 last_mouse_y = mouse_y;
