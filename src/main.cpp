@@ -94,6 +94,13 @@ struct ChunkData {
     std::vector<ChunkBlock> blocks;
 };
 
+struct SpawnPoint {
+    bool valid = false;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
 static size_t CurlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t total = size * nmemb;
     std::vector<unsigned char>* out = reinterpret_cast<std::vector<unsigned char>*>(userdata);
@@ -142,26 +149,50 @@ static std::string TileKeyForId(uint8_t tile_id) {
     return "s";
 }
 
-static void ApplyChunkToBlocks(const ChunkData& chunk,
+static bool ApplyChunkToBlocks(const ChunkData& chunk,
                                float block_size,
                                const std::map<uint8_t, int>& tile_mesh_index,
-                               std::vector<voxel::VoxelRenderer::Block>* out_blocks) {
+                               std::vector<voxel::VoxelRenderer::Block>* out_blocks,
+                               SpawnPoint* out_spawn) {
     if (!out_blocks)
-        return;
+        return false;
     out_blocks->clear();
     out_blocks->reserve(chunk.blocks.size());
+    size_t spawn_count = 0;
+    static const uint8_t kSpawnTileId = 8;
+    static const uint8_t kSpawnTileIdAscii = static_cast<uint8_t>('S');
     for (size_t i = 0; i < chunk.blocks.size(); ++i) {
         const ChunkBlock& blk = chunk.blocks[i];
+        const float world_x = (chunk.header.chunk_x * 32 + blk.x) * block_size + block_size * 0.5f;
+        const float world_y = (chunk.header.chunk_y * 32 + blk.y) * block_size + block_size * 0.5f;
+        const float world_z = (chunk.header.chunk_z * 32 + blk.z) * block_size + block_size * 0.5f;
+        if (blk.tile_id == kSpawnTileId || blk.tile_id == kSpawnTileIdAscii) {
+            spawn_count += 1;
+            if (out_spawn) {
+                out_spawn->x = world_x;
+                out_spawn->y = world_y;
+                out_spawn->z = world_z;
+            }
+            continue;
+        }
         voxel::VoxelRenderer::Block block;
-        block.x = (chunk.header.chunk_x * 32 + blk.x) * block_size + block_size * 0.5f;
-        block.y = (chunk.header.chunk_y * 32 + blk.y) * block_size + block_size * 0.5f;
-        block.z = (chunk.header.chunk_z * 32 + blk.z) * block_size + block_size * 0.5f;
+        block.x = world_x;
+        block.y = world_y;
+        block.z = world_z;
         block.key = TileKeyForId(blk.tile_id);
         std::map<uint8_t, int>::const_iterator it = tile_mesh_index.find(blk.tile_id);
         block.mesh_index = (it != tile_mesh_index.end()) ? it->second : 0;
         block.tex_index = block.mesh_index;
         out_blocks->push_back(block);
     }
+    if (out_spawn) {
+        out_spawn->valid = (spawn_count == 1);
+    }
+    if (spawn_count != 1) {
+        fprintf(stderr, "Spawn marker error: expected 1 spawn tile, found %zu\n", spawn_count);
+        return false;
+    }
+    return true;
 }
 
 static bool IsExtensionAvailable(const ImVector<VkExtensionProperties>& properties, const char* extension) {
@@ -492,10 +523,19 @@ int main(int, char**) {
     std::map<uint8_t, int> tile_mesh_index;
     tile_mesh_index[0] = 0;
     tile_mesh_index[1] = 0;
+    float camera_x = 6.0f;
+    float camera_y = 6.0f;
+    float camera_z = 6.0f;
     if (FetchChunkBinary(chunk_url, &chunk_raw) && ParseChunkBinary(chunk_raw, &chunk)) {
         float block_size = chunk.header.block_size_cm > 0 ? (chunk.header.block_size_cm / 100.0f) : 0.6f;
-        ApplyChunkToBlocks(chunk, block_size, tile_mesh_index, &blocks);
+        SpawnPoint spawn;
+        bool spawn_ok = ApplyChunkToBlocks(chunk, block_size, tile_mesh_index, &blocks, &spawn);
         g_VoxelRenderer.setBlocks(blocks, block_size);
+        if (spawn_ok) {
+            camera_x = spawn.x;
+            camera_y = spawn.y;
+            camera_z = spawn.z;
+        }
         if (!blocks.empty()) {
             float min_x = blocks[0].x;
             float min_y = blocks[0].y;
@@ -518,9 +558,6 @@ int main(int, char**) {
         }
     }
 
-    float camera_x = 6.0f;
-    float camera_y = 6.0f;
-    float camera_z = 6.0f;
     float camera_yaw = 3.1415926f * 0.75f;
     float camera_pitch = -0.4f;
     float move_speed = 4.5f;
