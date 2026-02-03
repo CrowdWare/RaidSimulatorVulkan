@@ -533,7 +533,7 @@ int main(int, char**) {
         g_VoxelRenderer.setBlocks(blocks, block_size);
         if (spawn_ok) {
             camera_x = spawn.x;
-            camera_y = spawn.y;
+            camera_y = spawn.y + 1.2f;  // camera on 150 cm eye height
             camera_z = spawn.z;
         }
         if (!blocks.empty()) {
