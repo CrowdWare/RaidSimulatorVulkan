@@ -11,6 +11,7 @@
 #include "imgui_impl_vulkan.h"
 #include "sml_ui.h"
 #include "voxel_renderer.h"
+#include "voxel_character_controller.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <unordered_set>
 
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
@@ -101,6 +103,21 @@ struct SpawnPoint {
     float z = 0.0f;
 };
 
+static bool IsSpawnTileId(uint8_t tile_id) {
+    static const uint8_t kSpawnTileId = 8;
+    static const uint8_t kSpawnTileIdAscii = static_cast<uint8_t>('S');
+    return tile_id == kSpawnTileId || tile_id == kSpawnTileIdAscii;
+}
+
+static long long BlockKey(int x, int y, int z) {
+    constexpr int kOffset = 1 << 20;
+    constexpr long long kMask = (1LL << 21) - 1;
+    long long xx = static_cast<long long>(x + kOffset) & kMask;
+    long long yy = static_cast<long long>(y + kOffset) & kMask;
+    long long zz = static_cast<long long>(z + kOffset) & kMask;
+    return (xx << 42) | (yy << 21) | zz;
+}
+
 static size_t CurlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t total = size * nmemb;
     std::vector<unsigned char>* out = reinterpret_cast<std::vector<unsigned char>*>(userdata);
@@ -159,14 +176,12 @@ static bool ApplyChunkToBlocks(const ChunkData& chunk,
     out_blocks->clear();
     out_blocks->reserve(chunk.blocks.size());
     size_t spawn_count = 0;
-    static const uint8_t kSpawnTileId = 8;
-    static const uint8_t kSpawnTileIdAscii = static_cast<uint8_t>('S');
     for (size_t i = 0; i < chunk.blocks.size(); ++i) {
         const ChunkBlock& blk = chunk.blocks[i];
         const float world_x = (chunk.header.chunk_x * 32 + blk.x) * block_size + block_size * 0.5f;
         const float world_y = (chunk.header.chunk_y * 32 + blk.y) * block_size + block_size * 0.5f;
         const float world_z = (chunk.header.chunk_z * 32 + blk.z) * block_size + block_size * 0.5f;
-        if (blk.tile_id == kSpawnTileId || blk.tile_id == kSpawnTileIdAscii) {
+        if (IsSpawnTileId(blk.tile_id)) {
             spawn_count += 1;
             if (out_spawn) {
                 out_spawn->x = world_x;
@@ -520,21 +535,45 @@ int main(int, char**) {
     std::vector<unsigned char> chunk_raw;
     ChunkData chunk;
     std::vector<voxel::VoxelRenderer::Block> blocks;
+    std::unordered_set<long long> solid_blocks;
     std::map<uint8_t, int> tile_mesh_index;
     tile_mesh_index[0] = 0;
     tile_mesh_index[1] = 0;
     float camera_x = 6.0f;
     float camera_y = 6.0f;
     float camera_z = 6.0f;
+    float eye_height = 1.5f;
+    voxel::CharacterConfig character_config;
+    character_config.height = 1.7f;
+    character_config.radius = 0.25f;
+    voxel::CharacterController character(character_config);
     if (FetchChunkBinary(chunk_url, &chunk_raw) && ParseChunkBinary(chunk_raw, &chunk)) {
         float block_size = chunk.header.block_size_cm > 0 ? (chunk.header.block_size_cm / 100.0f) : 0.6f;
         SpawnPoint spawn;
         bool spawn_ok = ApplyChunkToBlocks(chunk, block_size, tile_mesh_index, &blocks, &spawn);
         g_VoxelRenderer.setBlocks(blocks, block_size);
+        character_config.block_size = block_size;
+        character = voxel::CharacterController(character_config);
+        solid_blocks.clear();
+        solid_blocks.reserve(chunk.blocks.size());
+        for (size_t i = 0; i < chunk.blocks.size(); ++i) {
+            const ChunkBlock& blk = chunk.blocks[i];
+            if (IsSpawnTileId(blk.tile_id))
+                continue;
+            const int wx = chunk.header.chunk_x * 32 + blk.x;
+            const int wy = chunk.header.chunk_y * 32 + blk.y;
+            const int wz = chunk.header.chunk_z * 32 + blk.z;
+            solid_blocks.insert(BlockKey(wx, wy, wz));
+        }
+        character.setSolidQuery([&solid_blocks](int ix, int iy, int iz) {
+            return solid_blocks.find(BlockKey(ix, iy, iz)) != solid_blocks.end();
+        });
         if (spawn_ok) {
-            camera_x = spawn.x;
-            camera_y = spawn.y + 1.2f;  // camera on 150 cm eye height
-            camera_z = spawn.z;
+            character.setPosition({spawn.x, spawn.y + character_config.height * 0.5f, spawn.z});
+            const voxel::Vec3 pos = character.position();
+            camera_x = pos.x;
+            camera_y = pos.y + (eye_height - character_config.height * 0.5f);
+            camera_z = pos.z;
         }
         if (!blocks.empty()) {
             float min_x = blocks[0].x;
@@ -603,6 +642,7 @@ int main(int, char**) {
         const bool key_a = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
         const bool key_s = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
         const bool key_d = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
+        const bool key_space = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
         const bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
         const bool rmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
         const bool ui_active = ImGui::IsAnyItemActive();
@@ -638,38 +678,50 @@ int main(int, char**) {
         const bool left_input = key_a;
         const bool right_input = key_d;
 
-        if (forward_input || back_input || left_input || right_input) {
-            const float yaw = camera_yaw;
-            const float forward_x = std::cos(yaw);
-            const float forward_z = std::sin(yaw);
-            const float right_x = -forward_z;
-            const float right_z = forward_x;
-            float move_x = 0.0f;
-            float move_z = 0.0f;
-            if (forward_input) {
-                move_x += forward_x;
-                move_z += forward_z;
-            }
-            if (back_input) {
-                move_x -= forward_x;
-                move_z -= forward_z;
-            }
-            if (left_input) {
-                move_x -= right_x;
-                move_z -= right_z;
-            }
-            if (right_input) {
-                move_x += right_x;
-                move_z += right_z;
-            }
-            const float len = std::sqrt(move_x * move_x + move_z * move_z);
-            if (len > 0.0001f) {
-                move_x /= len;
-                move_z /= len;
-            }
-            camera_x += move_x * move_speed * dt;
-            camera_z += move_z * move_speed * dt;
+        voxel::CharacterInput character_input;
+        const float yaw = camera_yaw;
+        const float forward_x = std::cos(yaw);
+        const float forward_z = std::sin(yaw);
+        const float right_x = -forward_z;
+        const float right_z = forward_x;
+        float move_x = 0.0f;
+        float move_z = 0.0f;
+        if (forward_input) {
+            move_x += forward_x;
+            move_z += forward_z;
         }
+        if (back_input) {
+            move_x -= forward_x;
+            move_z -= forward_z;
+        }
+        if (left_input) {
+            move_x -= right_x;
+            move_z -= right_z;
+        }
+        if (right_input) {
+            move_x += right_x;
+            move_z += right_z;
+        }
+        const float len = std::sqrt(move_x * move_x + move_z * move_z);
+        if (len > 0.0001f) {
+            move_x /= len;
+            move_z /= len;
+        }
+        const float accel = move_speed * 8.0f;
+        if (forward_input || back_input || left_input || right_input) {
+            character_input.accel_x = move_x * accel;
+            character_input.accel_z = move_z * accel;
+        } else {
+            const voxel::Vec3 vel = character.velocity();
+            character_input.accel_x = -vel.x * 6.0f;
+            character_input.accel_z = -vel.z * 6.0f;
+        }
+        character_input.jump = key_space;
+        character.update(dt, character_input);
+        const voxel::Vec3 pos = character.position();
+        camera_x = pos.x;
+        camera_y = pos.y + (eye_height - character_config.height * 0.5f);
+        camera_z = pos.z;
 
         g_VoxelRenderer.setCamera(camera_x, camera_y, camera_z, camera_yaw, camera_pitch);
 
