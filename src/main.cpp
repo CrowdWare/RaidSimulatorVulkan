@@ -220,6 +220,15 @@ static bool FetchText(const std::string& url, std::string* out_text) {
     return true;
 }
 
+static bool IsDebugEnabled(const char* env_name) {
+    const char* value = std::getenv(env_name);
+    if (!value)
+        return false;
+    std::string v(value);
+    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return v == "1" || v == "true" || v == "yes" || v == "on";
+}
+
 struct ChunkCoord {
     int x = 0;
     int y = 0;
@@ -242,6 +251,11 @@ static std::vector<ChunkCoord> ParseChunkList(const std::string& text) {
             coords.push_back(coord);
         }
     }
+    std::sort(coords.begin(), coords.end(), [](const ChunkCoord& a, const ChunkCoord& b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    });
     return coords;
 }
 
@@ -669,6 +683,7 @@ int main(int, char**) {
     std::string server_base = "http://localhost:8080";
     std::string chunk_list_url = server_base + "/chunks";
     std::string chunk_list_text;
+    const bool debug_chunks = IsDebugEnabled("CHUNK_DEBUG");
     std::vector<unsigned char> chunk_raw;
     ChunkData chunk;
     std::vector<voxel::VoxelRenderer::Block> blocks;
@@ -688,6 +703,11 @@ int main(int, char**) {
     if (FetchText(chunk_list_url, &chunk_list_text)) {
         std::vector<ChunkCoord> chunk_coords = ParseChunkList(chunk_list_text);
         printf("Chunk list contains %zu entries\n", chunk_coords.size());
+        if (debug_chunks) {
+            for (size_t i = 0; i < chunk_coords.size(); ++i) {
+                printf("Chunk[%zu] = (%d,%d,%d)\n", i, chunk_coords[i].x, chunk_coords[i].y, chunk_coords[i].z);
+            }
+        }
         SpawnPoint spawn;
         bool spawn_ok = false;
         float block_size = 0.6f;
