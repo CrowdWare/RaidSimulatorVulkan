@@ -607,10 +607,10 @@ int main(int, char**) {
     std::string shader_world_frag = ResolveWorkspaceFile("RaidSimulator/shaders/world.frag.spv");
     std::string shader_pick_vert = ResolveWorkspaceFile("RaidSimulator/shaders/pick.vert.spv");
     std::string shader_pick_frag = ResolveWorkspaceFile("RaidSimulator/shaders/pick.frag.spv");
-    std::string ground_texture = ResolveWorkspaceFile("RaidBuilder/assets/textures/raid_ground.png");
+    std::string ground_texture = ResolveWorkspaceFile("Assets/textures/raid_ground.png");
     const std::string repo_root = ResolveWorkspacePath("");
     const std::string tiles_root = "RaidBuilder/tiles";
-    const std::string default_texture_rel = "RaidBuilder/assets/textures/raid_stone.png";
+    const std::string default_texture_rel = "Assets/textures/raid_stone.png";
     TileCatalog tile_catalog;
     std::string tile_error;
     if (!LoadTileCatalog(repo_root, tiles_root, default_texture_rel, &tile_catalog, &tile_error)) {
