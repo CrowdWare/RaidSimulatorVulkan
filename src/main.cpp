@@ -714,7 +714,6 @@ int main(int, char**) {
         solid_blocks.clear();
         for (size_t ci = 0; ci < chunk_coords.size(); ++ci) {
             const ChunkCoord& coord = chunk_coords[ci];
-            printf("Loading chunk (%d,%d,%d)\n", coord.x, coord.y, coord.z);
             std::ostringstream url;
             url << server_base << "/chunk?x=" << coord.x << "&y=" << coord.y << "&z=" << coord.z;
             chunk_raw.clear();
