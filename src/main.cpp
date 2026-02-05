@@ -12,6 +12,7 @@
 #include "sml_ui.h"
 #include "voxel_renderer.h"
 #include "voxel_character_controller.h"
+#include "tile_catalog.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,12 @@
 #include <map>
 #include <algorithm>
 #include <unordered_set>
+#include <sys/stat.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <unistd.h>
+#include <limits.h>
+#endif
 
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
@@ -72,8 +79,68 @@ static bool FileExists(const std::string& path) {
     return file.good();
 }
 
+static bool DirExists(const std::string& path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0)
+        return false;
+    return (st.st_mode & S_IFDIR) != 0;
+}
+
 static std::string ResolveRepoPath(const std::string& rel) {
     return std::string("RaidSimulator/") + rel;
+}
+
+static std::string GetExecutableDir() {
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(&buf[0], &size) != 0)
+        return ".";
+    buf.resize(std::strlen(buf.c_str()));
+    char real_path[PATH_MAX];
+    if (realpath(buf.c_str(), real_path))
+        buf = real_path;
+    size_t slash = buf.find_last_of('/');
+    if (slash == std::string::npos)
+        return ".";
+    return buf.substr(0, slash);
+#else
+    return ".";
+#endif
+}
+
+static std::string ResolveWorkspacePath(const std::string& rel) {
+    if (DirExists("RaidBuilder")) {
+        if (rel.empty())
+            return ".";
+        return std::string("./") + rel;
+    }
+    std::string dir = GetExecutableDir();
+    for (int i = 0; i < 8; ++i) {
+        std::string repo_candidate = dir + "/RaidBuilder";
+        if (DirExists(repo_candidate)) {
+            if (rel.empty())
+                return dir;
+            return dir + "/" + rel;
+        }
+        size_t slash = dir.find_last_of('/');
+        if (slash == std::string::npos)
+            break;
+        dir = dir.substr(0, slash);
+    }
+    return rel;
+}
+
+static std::string ResolveWorkspaceFile(const std::string& rel) {
+    if (rel.empty())
+        return rel;
+    if (rel[0] == '/' || rel[0] == '\\')
+        return rel;
+    std::string root = ResolveWorkspacePath("");
+    if (!root.empty())
+        return root + "/" + rel;
+    return rel;
 }
 
 struct ChunkHeader {
@@ -159,16 +226,17 @@ static bool ParseChunkBinary(const std::vector<unsigned char>& data, ChunkData* 
     return true;
 }
 
-static std::string TileKeyForId(uint8_t tile_id) {
-    static const char* kTileKeys[] = {"s", "t", "u", "v", "w", "x", "y", "z"};
-    if (tile_id < sizeof(kTileKeys) / sizeof(kTileKeys[0]))
-        return kTileKeys[tile_id];
-    return "s";
+static std::string TileKeyForId(uint8_t tile_id,
+                                const TileCatalog& catalog,
+                                const std::vector<std::string>& legacy_keys) {
+    return ResolveTileKey(tile_id, catalog, legacy_keys);
 }
 
 static bool ApplyChunkToBlocks(const ChunkData& chunk,
                                float block_size,
                                const std::map<uint8_t, int>& tile_mesh_index,
+                               const TileCatalog& catalog,
+                               const std::vector<std::string>& legacy_keys,
                                std::vector<voxel::VoxelRenderer::Block>* out_blocks,
                                SpawnPoint* out_spawn) {
     if (!out_blocks)
@@ -176,6 +244,7 @@ static bool ApplyChunkToBlocks(const ChunkData& chunk,
     out_blocks->clear();
     out_blocks->reserve(chunk.blocks.size());
     size_t spawn_count = 0;
+    std::unordered_set<uint8_t> unknown_ids;
     for (size_t i = 0; i < chunk.blocks.size(); ++i) {
         const ChunkBlock& blk = chunk.blocks[i];
         const float world_x = (chunk.header.chunk_x * 32 + blk.x) * block_size + block_size * 0.5f;
@@ -194,10 +263,27 @@ static bool ApplyChunkToBlocks(const ChunkData& chunk,
         block.x = world_x;
         block.y = world_y;
         block.z = world_z;
-        block.key = TileKeyForId(blk.tile_id);
-        std::map<uint8_t, int>::const_iterator it = tile_mesh_index.find(blk.tile_id);
-        block.mesh_index = (it != tile_mesh_index.end()) ? it->second : 0;
-        block.tex_index = block.mesh_index;
+        block.key = TileKeyForId(blk.tile_id, catalog, legacy_keys);
+        int mesh_index = -1;
+        std::map<std::string, int>::const_iterator by_key = catalog.index_by_key.find(block.key);
+        if (by_key != catalog.index_by_key.end()) {
+            mesh_index = by_key->second;
+        } else {
+            std::map<uint8_t, int>::const_iterator it = tile_mesh_index.find(blk.tile_id);
+            if (it != tile_mesh_index.end())
+                mesh_index = it->second;
+        }
+        if (mesh_index < 0) {
+            if (unknown_ids.insert(blk.tile_id).second)
+                fprintf(stderr, "Unknown tile id %u in chunk\n", blk.tile_id);
+            block.mesh_index = 0;
+            block.tex_index = 0;
+        } else {
+            block.mesh_index = mesh_index;
+            const size_t mesh_idx = static_cast<size_t>(block.mesh_index);
+            bool has_uv = (mesh_idx < catalog.mesh_has_uv.size()) ? catalog.mesh_has_uv[mesh_idx] : false;
+            block.tex_index = has_uv ? block.mesh_index : -2;
+        }
         out_blocks->push_back(block);
     }
     if (out_spawn) {
@@ -468,15 +554,25 @@ int main(int, char**) {
     ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
     SetupVulkanWindow(wd, surface, w, h);
 
-    std::string shader_world_vert = ResolveRepoPath("shaders/world.vert.spv");
-    std::string shader_world_frag = ResolveRepoPath("shaders/world.frag.spv");
-    std::string shader_pick_vert = ResolveRepoPath("shaders/pick.vert.spv");
-    std::string shader_pick_frag = ResolveRepoPath("shaders/pick.frag.spv");
-    std::string ground_texture = ResolveRepoPath("../RaidBuilder/assets/textures/raid_ground.png");
-    std::string block_texture = ResolveRepoPath("../RaidBuilder/assets/textures/raid_stone.png");
-
-    std::vector<std::string> block_texture_paths;
-    block_texture_paths.push_back(block_texture);
+    std::string shader_world_vert = ResolveWorkspaceFile("RaidSimulator/shaders/world.vert.spv");
+    std::string shader_world_frag = ResolveWorkspaceFile("RaidSimulator/shaders/world.frag.spv");
+    std::string shader_pick_vert = ResolveWorkspaceFile("RaidSimulator/shaders/pick.vert.spv");
+    std::string shader_pick_frag = ResolveWorkspaceFile("RaidSimulator/shaders/pick.frag.spv");
+    std::string ground_texture = ResolveWorkspaceFile("RaidBuilder/assets/textures/raid_ground.png");
+    const std::string repo_root = ResolveWorkspacePath("");
+    const std::string tiles_root = "RaidBuilder/tiles";
+    const std::string default_texture_rel = "RaidBuilder/assets/textures/raid_stone.png";
+    TileCatalog tile_catalog;
+    std::string tile_error;
+    if (!LoadTileCatalog(repo_root, tiles_root, default_texture_rel, &tile_catalog, &tile_error)) {
+        std::string tiles_root_abs = repo_root.empty() ? tiles_root : (repo_root + "/" + tiles_root);
+        fprintf(stderr, "Tile catalog load failed: %s\n", tile_error.c_str());
+        fprintf(stderr, "Tile catalog root: %s (repo_root=%s)\n", tiles_root_abs.c_str(), repo_root.c_str());
+    }
+    std::vector<std::string> block_texture_paths = tile_catalog.texture_paths;
+    if (block_texture_paths.empty()) {
+        fprintf(stderr, "Tile catalog missing textures; rendering will be empty.\n");
+    }
 
     if (!g_VoxelRenderer.init(g_Device, g_PhysicalDevice, g_Queue, g_QueueFamily, wd->RenderPass,
                               shader_world_vert.c_str(),
@@ -485,7 +581,12 @@ int main(int, char**) {
                               shader_pick_frag.c_str(),
                               ground_texture.c_str(),
                               block_texture_paths)) {
-        fprintf(stderr, "VoxelRenderer init failed (missing shaders?)\n");
+        fprintf(stderr, "VoxelRenderer init failed (missing shaders or textures?)\n");
+    }
+    if (!tile_catalog.meshes.empty()) {
+        g_VoxelRenderer.setBlockMeshes(tile_catalog.meshes);
+    } else {
+        fprintf(stderr, "Tile catalog missing meshes; blocks will not render.\n");
     }
 
     IMGUI_CHECKVERSION();
@@ -537,8 +638,9 @@ int main(int, char**) {
     std::vector<voxel::VoxelRenderer::Block> blocks;
     std::unordered_set<long long> solid_blocks;
     std::map<uint8_t, int> tile_mesh_index;
-    tile_mesh_index[0] = 0;
-    tile_mesh_index[1] = 0;
+    for (size_t i = 0; i < tile_catalog.tiles.size(); ++i)
+        tile_mesh_index[static_cast<uint8_t>(i)] = static_cast<int>(i);
+    const std::vector<std::string> legacy_keys = {"s", "t", "u", "v", "w", "x", "y", "z"};
     float camera_x = 6.0f;
     float camera_y = 6.0f;
     float camera_z = 6.0f;
@@ -550,7 +652,7 @@ int main(int, char**) {
     if (FetchChunkBinary(chunk_url, &chunk_raw) && ParseChunkBinary(chunk_raw, &chunk)) {
         float block_size = chunk.header.block_size_cm > 0 ? (chunk.header.block_size_cm / 100.0f) : 0.6f;
         SpawnPoint spawn;
-        bool spawn_ok = ApplyChunkToBlocks(chunk, block_size, tile_mesh_index, &blocks, &spawn);
+        bool spawn_ok = ApplyChunkToBlocks(chunk, block_size, tile_mesh_index, tile_catalog, legacy_keys, &blocks, &spawn);
         g_VoxelRenderer.setBlocks(blocks, block_size);
         character_config.block_size = block_size;
         character = voxel::CharacterController(character_config);

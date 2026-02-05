@@ -9,10 +9,12 @@ if(APPLE)
     target_sources(RaidSimulator PRIVATE src/mac_menu.mm)
     target_link_libraries(RaidSimulator PRIVATE "-framework Cocoa")
 endif()
-
 target_link_libraries(RaidSimulator
-    PRIVATE VoxelEngine SMLParser SMLUI curl
+    PRIVATE VoxelEngine SMLParser SMLUI
 )
+
+find_package(CURL REQUIRED)
+target_link_libraries(RaidSimulator PRIVATE CURL::libcurl)
 
 target_compile_features(RaidSimulator PUBLIC cxx_std_11)
 
@@ -20,6 +22,7 @@ target_include_directories(RaidSimulator PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    ${CMAKE_CURRENT_SOURCE_DIR}/../VoxelEngine/include
 )
 
 set(SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
