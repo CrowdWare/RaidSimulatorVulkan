@@ -210,6 +210,41 @@ static bool FetchChunkBinary(const std::string& url, std::vector<unsigned char>*
     return (res == CURLE_OK && response == 200);
 }
 
+static bool FetchText(const std::string& url, std::string* out_text) {
+    if (!out_text)
+        return false;
+    std::vector<unsigned char> raw;
+    if (!FetchChunkBinary(url, &raw))
+        return false;
+    out_text->assign(raw.begin(), raw.end());
+    return true;
+}
+
+struct ChunkCoord {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+};
+
+static std::vector<ChunkCoord> ParseChunkList(const std::string& text) {
+    std::vector<ChunkCoord> coords;
+    std::istringstream iss(text);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.empty())
+            continue;
+        int x = 0, y = 0, z = 0;
+        if (std::sscanf(line.c_str(), "%d,%d,%d", &x, &y, &z) == 3) {
+            ChunkCoord coord;
+            coord.x = x;
+            coord.y = y;
+            coord.z = z;
+            coords.push_back(coord);
+        }
+    }
+    return coords;
+}
+
 static bool ParseChunkBinary(const std::vector<unsigned char>& data, ChunkData* out_chunk) {
     if (!out_chunk)
         return false;
@@ -241,8 +276,7 @@ static bool ApplyChunkToBlocks(const ChunkData& chunk,
                                SpawnPoint* out_spawn) {
     if (!out_blocks)
         return false;
-    out_blocks->clear();
-    out_blocks->reserve(chunk.blocks.size());
+    out_blocks->reserve(out_blocks->size() + chunk.blocks.size());
     size_t spawn_count = 0;
     std::unordered_set<uint8_t> unknown_ids;
     for (size_t i = 0; i < chunk.blocks.size(); ++i) {
@@ -286,11 +320,12 @@ static bool ApplyChunkToBlocks(const ChunkData& chunk,
         }
         out_blocks->push_back(block);
     }
-    if (out_spawn) {
+    if (out_spawn && spawn_count > 0) {
         out_spawn->valid = (spawn_count == 1);
     }
-    if (spawn_count != 1) {
-        fprintf(stderr, "Spawn marker error: expected 1 spawn tile, found %zu\n", spawn_count);
+    if (spawn_count > 1) {
+        fprintf(stderr, "Spawn marker error: expected 1 spawn tile, found %zu in chunk (%d,%d,%d)\n",
+                spawn_count, chunk.header.chunk_x, chunk.header.chunk_y, chunk.header.chunk_z);
         return false;
     }
     return true;
@@ -632,7 +667,8 @@ int main(int, char**) {
 
     curl_global_init(CURL_GLOBAL_ALL);
     std::string server_base = "http://localhost:8080";
-    std::string chunk_url = server_base + "/chunk?x=0&y=0&z=0";
+    std::string chunk_list_url = server_base + "/chunks";
+    std::string chunk_list_text;
     std::vector<unsigned char> chunk_raw;
     ChunkData chunk;
     std::vector<voxel::VoxelRenderer::Block> blocks;
@@ -649,24 +685,49 @@ int main(int, char**) {
     character_config.height = 1.7f;
     character_config.radius = 0.25f;
     voxel::CharacterController character(character_config);
-    if (FetchChunkBinary(chunk_url, &chunk_raw) && ParseChunkBinary(chunk_raw, &chunk)) {
-        float block_size = chunk.header.block_size_cm > 0 ? (chunk.header.block_size_cm / 100.0f) : 0.6f;
+    if (FetchText(chunk_list_url, &chunk_list_text)) {
+        std::vector<ChunkCoord> chunk_coords = ParseChunkList(chunk_list_text);
+        printf("Chunk list contains %zu entries\n", chunk_coords.size());
         SpawnPoint spawn;
-        bool spawn_ok = ApplyChunkToBlocks(chunk, block_size, tile_mesh_index, tile_catalog, legacy_keys, &blocks, &spawn);
-        g_VoxelRenderer.setBlocks(blocks, block_size);
-        character_config.block_size = block_size;
-        character = voxel::CharacterController(character_config);
+        bool spawn_ok = false;
+        float block_size = 0.6f;
         solid_blocks.clear();
-        solid_blocks.reserve(chunk.blocks.size());
-        for (size_t i = 0; i < chunk.blocks.size(); ++i) {
-            const ChunkBlock& blk = chunk.blocks[i];
-            if (IsSpawnTileId(blk.tile_id))
+        for (size_t ci = 0; ci < chunk_coords.size(); ++ci) {
+            const ChunkCoord& coord = chunk_coords[ci];
+            printf("Loading chunk (%d,%d,%d)\n", coord.x, coord.y, coord.z);
+            std::ostringstream url;
+            url << server_base << "/chunk?x=" << coord.x << "&y=" << coord.y << "&z=" << coord.z;
+            chunk_raw.clear();
+            if (!FetchChunkBinary(url.str(), &chunk_raw)) {
+                printf("Failed to fetch chunk (%d,%d,%d)\n", coord.x, coord.y, coord.z);
                 continue;
-            const int wx = chunk.header.chunk_x * 32 + blk.x;
-            const int wy = chunk.header.chunk_y * 32 + blk.y;
-            const int wz = chunk.header.chunk_z * 32 + blk.z;
-            solid_blocks.insert(BlockKey(wx, wy, wz));
+            }
+            if (!ParseChunkBinary(chunk_raw, &chunk)) {
+                printf("Failed to parse chunk (%d,%d,%d)\n", coord.x, coord.y, coord.z);
+                continue;
+            }
+            if (ci == 0) {
+                block_size = chunk.header.block_size_cm > 0 ? (chunk.header.block_size_cm / 100.0f) : 0.6f;
+                character_config.block_size = block_size;
+                character = voxel::CharacterController(character_config);
+            }
+            SpawnPoint chunk_spawn;
+            bool chunk_spawn_ok = ApplyChunkToBlocks(chunk, block_size, tile_mesh_index, tile_catalog, legacy_keys, &blocks, &chunk_spawn);
+            if (chunk_spawn_ok && chunk_spawn.valid) {
+                spawn = chunk_spawn;
+                spawn_ok = true;
+            }
+            for (size_t i = 0; i < chunk.blocks.size(); ++i) {
+                const ChunkBlock& blk = chunk.blocks[i];
+                if (IsSpawnTileId(blk.tile_id))
+                    continue;
+                const int wx = chunk.header.chunk_x * 32 + blk.x;
+                const int wy = chunk.header.chunk_y * 32 + blk.y;
+                const int wz = chunk.header.chunk_z * 32 + blk.z;
+                solid_blocks.insert(BlockKey(wx, wy, wz));
+            }
         }
+        g_VoxelRenderer.setBlocks(blocks, block_size);
         character.setSolidQuery([&solid_blocks](int ix, int iy, int iz) {
             return solid_blocks.find(BlockKey(ix, iy, iz)) != solid_blocks.end();
         });
