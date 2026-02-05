@@ -19,5 +19,5 @@ cmake --build build
 
 ## Run
 ```sh
-./build/RaidSimulator/RaidSimulator
+./run_game.sh
 ```
