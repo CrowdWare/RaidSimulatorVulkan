@@ -157,6 +157,7 @@ struct ChunkBlock {
     uint8_t y;
     uint8_t z;
     uint8_t tile_id;
+    uint8_t scale_percent;
 };
 
 struct ChunkData {
@@ -314,12 +315,30 @@ static bool ParseChunkBinary(const std::vector<unsigned char>& data, ChunkData* 
         return false;
     ChunkHeader header = {};
     std::memcpy(&header, data.data(), sizeof(ChunkHeader));
-    size_t expected = sizeof(ChunkHeader) + sizeof(ChunkBlock) * header.block_count;
-    if (data.size() < expected)
+    const size_t payload = data.size() - sizeof(ChunkHeader);
+    if (header.block_count == 0) {
+        out_chunk->header = header;
+        out_chunk->blocks.clear();
+        return true;
+    }
+    if (payload % header.block_count != 0)
+        return false;
+    const size_t stride = payload / header.block_count;
+    if (stride != 4 && stride != 5)
         return false;
     out_chunk->header = header;
     out_chunk->blocks.resize(header.block_count);
-    std::memcpy(out_chunk->blocks.data(), data.data() + sizeof(ChunkHeader), sizeof(ChunkBlock) * header.block_count);
+    const unsigned char* ptr = data.data() + sizeof(ChunkHeader);
+    for (size_t i = 0; i < header.block_count; ++i) {
+        ChunkBlock blk = {};
+        blk.x = ptr[0];
+        blk.y = ptr[1];
+        blk.z = ptr[2];
+        blk.tile_id = ptr[3];
+        blk.scale_percent = (stride >= 5) ? ptr[4] : 100;
+        out_chunk->blocks[i] = blk;
+        ptr += stride;
+    }
     return true;
 }
 
@@ -364,6 +383,7 @@ static bool ApplyChunkToBlocks(const ChunkData& chunk,
         block.x = world_x;
         block.y = world_y;
         block.z = world_z;
+        block.scale_percent = (blk.scale_percent > 0) ? (int)blk.scale_percent : 100;
         block.key = TileKeyForId(blk.tile_id, catalog, legacy_keys);
         int mesh_index = -1;
         std::map<std::string, int>::const_iterator by_key = catalog.index_by_key.find(block.key);
@@ -733,7 +753,10 @@ int main(int, char**) {
     io.FontDefault = font_13;
 
     curl_global_init(CURL_GLOBAL_ALL);
-    std::string server_base = "http://localhost:8080";
+    const char* env_server_port = std::getenv("SERVER_PORT");
+    std::string server_port = (env_server_port && *env_server_port) ? env_server_port : "8080";
+    std::string server_base = "http://localhost:" + server_port;
+    printf("Using server base: %s\n", server_base.c_str());
     std::string chunk_list_url = server_base + "/chunks";
     std::string chunk_list_text;
     const bool debug_chunks = IsDebugEnabled("CHUNK_DEBUG");
@@ -742,6 +765,9 @@ int main(int, char**) {
     std::vector<voxel::VoxelRenderer::Block> blocks;
     std::unordered_set<long long> solid_blocks;
     std::set<std::string> non_colliding_keys;
+    int enemy_count = 0;
+    std::set<int> enemy_scales;
+    std::string enemy_scale_summary = "-";
     std::map<std::string, bool> collision_override_by_key;
     std::map<uint8_t, int> tile_mesh_index;
     for (size_t i = 0; i < tile_catalog.tiles.size(); ++i)
@@ -985,6 +1011,9 @@ int main(int, char**) {
                                     ImGuiWindowFlags_NoFocusOnAppearing;
         ImGui::Begin("FPSOverlay", nullptr, hud_flags);
         ImGui::Text("FPS: %.1f", fps);
+        ImGui::Text("Server: %s", server_base.c_str());
+        ImGui::Text("Enemy E: %d", enemy_count);
+        ImGui::Text("E scale%%: %s", enemy_scale_summary.c_str());
         ImGui::End();
 
         ImGui::Render();

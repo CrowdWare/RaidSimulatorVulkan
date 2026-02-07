@@ -21,6 +21,7 @@ layout(location = 0) out vec3 v_color;
 layout(location = 1) out vec3 v_normal;
 layout(location = 2) out vec2 v_uv;
 layout(location = 3) flat out float v_tex_index;
+layout(location = 4) flat out uint v_is_skinned;
 
 void main() {
     vec4 skinned_pos = vec4(in_pos, 1.0);
@@ -38,5 +39,6 @@ void main() {
     v_normal = skinned_normal;
     v_uv = in_uv;
     v_tex_index = pc.tint.a;
+    v_is_skinned = pc.skin.z;
     gl_Position = pc.mvp * skinned_pos;
 }
