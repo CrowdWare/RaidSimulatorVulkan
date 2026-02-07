@@ -23,6 +23,7 @@
 #include <cmath>
 #include <vector>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <unordered_set>
 #include <sys/stat.h>
@@ -170,6 +171,53 @@ struct SpawnPoint {
     float z = 0.0f;
 };
 
+static std::map<std::string, bool> ParseDungeonCollisionOverrides(const std::string& text) {
+    class DungeonCollisionHandler : public sml::SmlHandler {
+    public:
+        std::vector<std::string> stack;
+        std::string tile_key;
+        bool tile_collision = true;
+        bool tile_has_collision = false;
+        std::map<std::string, bool> overrides;
+
+        void startElement(const std::string& name) override {
+            stack.push_back(name);
+            if (name == "Tile") {
+                tile_key.clear();
+                tile_collision = true;
+                tile_has_collision = false;
+            }
+        }
+
+        void onProperty(const std::string& name, const sml::PropertyValue& value) override {
+            if (stack.empty() || stack.back() != "Tile")
+                return;
+            if (name == "key" && value.type == sml::PropertyValue::String)
+                tile_key = value.string_value;
+            else if (name == "collision" && value.type == sml::PropertyValue::Boolean) {
+                tile_collision = value.bool_value;
+                tile_has_collision = true;
+            }
+        }
+
+        void endElement(const std::string& name) override {
+            if (name == "Tile" && tile_has_collision && !tile_key.empty())
+                overrides[tile_key] = tile_collision;
+            if (!stack.empty())
+                stack.pop_back();
+        }
+    };
+
+    DungeonCollisionHandler handler;
+    try {
+        sml::SmlSaxParser parser(text);
+        parser.parse(handler);
+    } catch (...) {
+        return std::map<std::string, bool>();
+    }
+    return handler.overrides;
+}
+
 static bool IsSpawnTileId(uint8_t tile_id) {
     static const uint8_t kSpawnTileId = 8;
     static const uint8_t kSpawnTileIdAscii = static_cast<uint8_t>('S');
@@ -278,7 +326,12 @@ static bool ParseChunkBinary(const std::vector<unsigned char>& data, ChunkData* 
 static std::string TileKeyForId(uint8_t tile_id,
                                 const TileCatalog& catalog,
                                 const std::vector<std::string>& legacy_keys) {
-    return ResolveTileKey(tile_id, catalog, legacy_keys);
+    std::string key = ResolveTileKey(tile_id, catalog, legacy_keys);
+    if (!key.empty())
+        return key;
+    if (tile_id >= 32 && tile_id <= 126)
+        return std::string(1, static_cast<char>(tile_id));
+    return key;
 }
 
 static bool ApplyChunkToBlocks(const ChunkData& chunk,
@@ -688,6 +741,8 @@ int main(int, char**) {
     ChunkData chunk;
     std::vector<voxel::VoxelRenderer::Block> blocks;
     std::unordered_set<long long> solid_blocks;
+    std::set<std::string> non_colliding_keys;
+    std::map<std::string, bool> collision_override_by_key;
     std::map<uint8_t, int> tile_mesh_index;
     for (size_t i = 0; i < tile_catalog.tiles.size(); ++i)
         tile_mesh_index[static_cast<uint8_t>(i)] = static_cast<int>(i);
@@ -700,6 +755,19 @@ int main(int, char**) {
     character_config.height = 1.7f;
     character_config.radius = 0.25f;
     voxel::CharacterController character(character_config);
+    std::string dungeon_text;
+    if (FetchText(server_base + "/dungeon", &dungeon_text)) {
+        collision_override_by_key = ParseDungeonCollisionOverrides(dungeon_text);
+    }
+    for (size_t i = 0; i < tile_catalog.tiles.size(); ++i) {
+        bool collision = tile_catalog.tiles[i].collision;
+        std::map<std::string, bool>::const_iterator it = collision_override_by_key.find(tile_catalog.tiles[i].key);
+        if (it != collision_override_by_key.end())
+            collision = it->second;
+        if (!collision)
+            non_colliding_keys.insert(tile_catalog.tiles[i].key);
+    }
+
     if (FetchText(chunk_list_url, &chunk_list_text)) {
         std::vector<ChunkCoord> chunk_coords = ParseChunkList(chunk_list_text);
         printf("Chunk list contains %zu entries\n", chunk_coords.size());
@@ -743,6 +811,9 @@ int main(int, char**) {
                 const int wx = chunk.header.chunk_x * 32 + blk.x;
                 const int wy = chunk.header.chunk_y * 32 + blk.y;
                 const int wz = chunk.header.chunk_z * 32 + blk.z;
+                const std::string key = TileKeyForId(blk.tile_id, tile_catalog, legacy_keys);
+                if (non_colliding_keys.find(key) != non_colliding_keys.end())
+                    continue;
                 solid_blocks.insert(BlockKey(wx, wy, wz));
             }
         }
